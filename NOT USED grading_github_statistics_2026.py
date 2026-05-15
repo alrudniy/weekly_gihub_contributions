@@ -5,7 +5,7 @@ Shows for each user per week:
 - Number of commits
 - Lines added/deleted
 - Number of PRs opened
-- Project items created/moved
+- Organization project items created/moved
 
 --repo. or C:\Projects\myrepoLocal filesystem path to the git repository. 
 Used for git log commands to count commits and lines added/deleted.
@@ -13,19 +13,8 @@ Used for git log commands to count commits and lines added/deleted.
 --repo_fulldrew-csci/f25_opportunityGitHub owner/repo format. 
 Used for GitHub API calls via gh CLI to fetch PRs and project items.
 
-
 Usage:
-# 
-python grading_github_statistics_2025.py --repo . --all_refs --repo_full drew-csci/opportunity_app_srping_2026 --start_date 2026-01-15 --end_date 2026-05-15 --org_project_owner drew-csci --org_project_number 6 
-
-# discovery_hub_spring_2026
-python grading_github_statistics_2025.py --repo . --all_refs --repo_full drew-csci/discovery_hub_spring_2026 --start_date 2026-01-15 --end_date 2026-05-15 --org_project_owner drew-csci --org_project_number 7 
-
-# minecraft_mod_spring_2026
-python grading_github_statistics_2025.py --repo . --all_refs --repo_full drew-csci/minecraft_mod_spring_2026 --start_date 2026-01-15 --end_date 2026-05-15 --org_project_owner drew-csci --org_project_number 5 
-
-# f25_opportunity
-python grading_github_statistics_2025.py --repo . --all_refs --repo_full drew-csci/f25_opportunity --start_date 2025-08-25 --end_date 2025-12-12 --org_project_owner drew-csci --org_project_number 3 --user_project_owner alrudniy --user_project_number 7 --name_fix_file fix_github_names.xlsx
+python grading_github_statistics_2025.py --repo . --all_refs --repo_full drew-csci/f25_opportunity --start_date 2025-08-25 --end_date 2025-12-12 --org_project_owner drew-csci --org_project_number 3 --name_fix_file fix_github_names.xlsx
 
 """
 
@@ -60,8 +49,6 @@ class WeeklyUserStats:
     lines_added: int = 0
     lines_deleted: int = 0
     prs_opened: int = 0
-    user_project_items_created: int = 0
-    user_project_items_moved: int = 0
     org_project_items_created: int = 0
     org_project_items_moved: int = 0
 
@@ -361,51 +348,18 @@ def count_prs_for_week(
 def count_project_items_per_user(
     project_owner: str,
     project_number: int,
-    is_org: bool = False,
     name_fix_map: Dict[str, str] = None
 ) -> Tuple[Dict[str, int], Dict[str, int]]:
     """
-    Count project items created and moved by each user.
+    Count project items created and moved by each user for an organization project.
     Returns: (items_created_by, items_with_status) dicts mapping fixed_name -> count
     """
     if name_fix_map is None:
         name_fix_map = {}
-    org_query = """
+    
+    query = """
     query($login: String!, $number: Int!, $cursor: String) {
       organization(login: $login) {
-        projectV2(number: $number) {
-          id
-          title
-          items(first: 100, after: $cursor) {
-            pageInfo { hasNextPage endCursor }
-            totalCount
-            nodes {
-              id
-              type
-              creator { login }
-              content {
-                ... on Issue { author { login } }
-                ... on PullRequest { author { login } }
-                ... on DraftIssue { creator { login } }
-              }
-              fieldValues(first: 20) {
-                nodes {
-                  ... on ProjectV2ItemFieldSingleSelectValue {
-                    name
-                    field { ... on ProjectV2SingleSelectField { name } }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    
-    user_query = """
-    query($login: String!, $number: Int!, $cursor: String) {
-      user(login: $login) {
         projectV2(number: $number) {
           id
           title
@@ -439,9 +393,6 @@ def count_project_items_per_user(
     items_created_by: Dict[str, int] = defaultdict(int)
     items_with_status: Dict[str, int] = defaultdict(int)
     
-    query = org_query if is_org else user_query
-    entity_type = "organization" if is_org else "user"
-    
     cursor = None
     
     while True:
@@ -466,7 +417,7 @@ def count_project_items_per_user(
         if payload.get("errors"):
             break
         
-        entity = (payload.get("data") or {}).get(entity_type) or {}
+        entity = (payload.get("data") or {}).get("organization") or {}
         project = entity.get("projectV2") or {}
         
         if not project:
@@ -522,13 +473,11 @@ def collect_weekly_stats(
     all_refs: bool = True,
     org_project_owner: str = "",
     org_project_number: int = 0,
-    user_project_owner: str = "",
-    user_project_number: int = 0,
     name_fix_map: Dict[str, str] = None
-) -> Tuple[List[WeeklyUserStats], Dict[str, str], Dict[str, int], Dict[str, int], Dict[str, int], Dict[str, int]]:
+) -> Tuple[List[WeeklyUserStats], Dict[str, str], Dict[str, int], Dict[str, int]]:
     """
     Collect statistics for all users across all weeks.
-    Returns: (list of WeeklyUserStats, dict of display_name -> github_username, project item dicts)
+    Returns: (list of WeeklyUserStats, dict of display_name -> github_username, org_items_created, org_items_moved)
     """
     if name_fix_map is None:
         name_fix_map = {}
@@ -539,26 +488,15 @@ def collect_weekly_stats(
     # Get project items once (not per-week since API doesn't support date filtering)
     org_items_created: Dict[str, int] = {}
     org_items_moved: Dict[str, int] = {}
-    user_items_created: Dict[str, int] = {}
-    user_items_moved: Dict[str, int] = {}
     
     if org_project_owner and org_project_number:
         print(f"  Fetching organization project items ({org_project_owner} #{org_project_number})...")
         org_items_created, org_items_moved = count_project_items_per_user(
-            org_project_owner, org_project_number, is_org=True, name_fix_map=name_fix_map
+            org_project_owner, org_project_number, name_fix_map=name_fix_map
         )
         print(f"    Found {sum(org_items_created.values())} items created, {sum(org_items_moved.values())} with status")
         if org_items_created:
             print(f"    Users with org items: {list(org_items_created.keys())[:10]}...")
-    
-    if user_project_owner and user_project_number:
-        print(f"  Fetching user project items ({user_project_owner} #{user_project_number})...")
-        user_items_created, user_items_moved = count_project_items_per_user(
-            user_project_owner, user_project_number, is_org=False, name_fix_map=name_fix_map
-        )
-        print(f"    Found {sum(user_items_created.values())} items created, {sum(user_items_moved.values())} with status")
-        if user_items_created:
-            print(f"    Users with user items: {list(user_items_created.keys())[:10]}...")
     
     for week_num, week_start, week_end in weeks:
         print(f"  Processing week {week_num}: {week_start} to {week_end}...")
@@ -630,7 +568,7 @@ def collect_weekly_stats(
         
         all_stats.extend(week_users.values())
     
-    return all_stats, known_users, org_items_created, org_items_moved, user_items_created, user_items_moved
+    return all_stats, known_users, org_items_created, org_items_moved
 
 
 def generate_output_filename(base_name: str, extension: str = ".csv") -> str:
@@ -643,9 +581,7 @@ def write_weekly_csv(
     path: str, 
     stats: List[WeeklyUserStats],
     org_items_created: Dict[str, int],
-    org_items_moved: Dict[str, int],
-    user_items_created: Dict[str, int],
-    user_items_moved: Dict[str, int]
+    org_items_moved: Dict[str, int]
 ) -> None:
     """Write weekly statistics to CSV file."""
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -660,15 +596,11 @@ def write_weekly_csv(
             "Added",
             "Deleted",
             "PRs",
-            "Items Crtd (usr prj)",
-            "Items Mvd (usr prj)",
             "Items Crtd (org prj)",
             "Items Mvd (org prj)"
         ])
         for s in stats:
             # Get project items for this user
-            usr_created = user_items_created.get(s.display_name, 0)
-            usr_moved = user_items_moved.get(s.display_name, 0)
             org_created = org_items_created.get(s.display_name, 0)
             org_moved = org_items_moved.get(s.display_name, 0)
             
@@ -682,8 +614,6 @@ def write_weekly_csv(
                 s.lines_added,
                 s.lines_deleted,
                 s.prs_opened,
-                usr_created,
-                usr_moved,
                 org_created,
                 org_moved
             ])
@@ -696,8 +626,6 @@ def write_summary_csv(
     known_users: Dict[str, str],
     org_items_created: Dict[str, int],
     org_items_moved: Dict[str, int],
-    user_items_created: Dict[str, int],
-    user_items_moved: Dict[str, int],
     name_fix_map: Dict[str, str] = None
 ) -> None:
     """Write a pivot-table style CSV with users as rows and weeks as columns."""
@@ -712,7 +640,7 @@ def write_summary_csv(
     
     # Add users from project items who might not have commits
     # Project items already have fixed names applied
-    all_project_users = set(org_items_created.keys()) | set(user_items_created.keys())
+    all_project_users = set(org_items_created.keys())
     for fixed_name in all_project_users:
         if fixed_name not in user_weeks:
             user_weeks[fixed_name] = {}
@@ -732,7 +660,6 @@ def write_summary_csv(
             ])
         header.extend([
             "Total Commits", "Total Added", "Total Deleted", "Total PRs",
-            "Usr Prj Items Crtd", "Usr Prj Items Mvd",
             "Org Prj Items Crtd", "Org Prj Items Mvd"
         ])
         w.writerow(header)
@@ -767,14 +694,12 @@ def write_summary_csv(
                     row.extend([0, 0, 0, 0])
             
             # Get project items for this user (names already fixed at collection time)
-            usr_created = user_items_created.get(display_name, 0)
-            usr_moved = user_items_moved.get(display_name, 0)
             org_created = org_items_created.get(display_name, 0)
             org_moved = org_items_moved.get(display_name, 0)
             
             row.extend([
                 total_commits, total_added, total_deleted, total_prs,
-                usr_created, usr_moved, org_created, org_moved
+                org_created, org_moved
             ])
             w.writerow(row)
 
@@ -785,14 +710,12 @@ def print_weekly_table(
     start_date: str,
     end_date: str,
     org_items_created: Dict[str, int],
-    org_items_moved: Dict[str, int],
-    user_items_created: Dict[str, int],
-    user_items_moved: Dict[str, int]
+    org_items_moved: Dict[str, int]
 ) -> None:
     """Print weekly statistics as a formatted table."""
-    print(f"\n{'='*130}")
+    print(f"\n{'='*115}")
     print(f"GitHub Weekly Statistics Report: {start_date} to {end_date}")
-    print(f"{'='*130}")
+    print(f"{'='*115}")
     
     # Group by week
     week_stats: Dict[int, List[WeeklyUserStats]] = defaultdict(list)
@@ -800,11 +723,11 @@ def print_weekly_table(
         week_stats[s.week_number].append(s)
     
     for week_num, week_start, week_end in weeks:
-        print(f"\n{'─'*130}")
+        print(f"\n{'─'*115}")
         print(f"Week {week_num}: {week_start} to {week_end}")
-        print("─"*130)
+        print("─"*115)
         
-        header = f"{'Name':30} {'GitHub':20} {'Commits':>8} {'Added':>8} {'Deleted':>8} {'PRs':>6} {'UCrtd':>6} {'UMvd':>6} {'OCrtd':>6} {'OMvd':>6}"
+        header = f"{'Name':30} {'GitHub':20} {'Commits':>8} {'Added':>8} {'Deleted':>8} {'PRs':>6} {'OCrtd':>6} {'OMvd':>6}"
         print(header)
         print("-" * len(header))
         
@@ -820,16 +743,14 @@ def print_weekly_table(
         
         for s in week_data:
             # Get project items for this user
-            usr_created = user_items_created.get(s.display_name, 0)
-            usr_moved = user_items_moved.get(s.display_name, 0)
             org_created = org_items_created.get(s.display_name, 0)
             org_moved = org_items_moved.get(s.display_name, 0)
             
-            if s.commits > 0 or s.prs_opened > 0 or usr_created > 0 or org_created > 0:
+            if s.commits > 0 or s.prs_opened > 0 or org_created > 0:
                 print(
                     f"{s.display_name[:30]:30} {s.github_username[:20]:20} "
                     f"{s.commits:>8} {s.lines_added:>8} {s.lines_deleted:>8} {s.prs_opened:>6} "
-                    f"{usr_created:>6} {usr_moved:>6} {org_created:>6} {org_moved:>6}"
+                    f"{org_created:>6} {org_moved:>6}"
                 )
                 total_commits += s.commits
                 total_added += s.lines_added
@@ -844,8 +765,8 @@ def print_weekly_table(
             )
     
     # Print legend
-    print(f"\n{'='*130}")
-    print("Legend: UCrtd=User Project Items Created, UMvd=User Project Items Moved, OCrtd=Org Project Items Created, OMvd=Org Project Items Moved")
+    print(f"\n{'='*115}")
+    print("Legend: OCrtd=Org Project Items Created, OMvd=Org Project Items Moved")
 
 
 def main() -> None:
@@ -865,10 +786,6 @@ def main() -> None:
     # Organization project options
     p.add_argument("--org_project_owner", default="", help="GitHub organization that owns the Project v2")
     p.add_argument("--org_project_number", type=int, default=0, help="Organization Project v2 number")
-    
-    # User project options
-    p.add_argument("--user_project_owner", default="", help="GitHub user that owns the Project v2")
-    p.add_argument("--user_project_number", type=int, default=0, help="User Project v2 number")
     
     p.add_argument("--out_csv", default="weekly_stats", help="Output CSV file base name (timestamp will be appended)")
     
@@ -898,7 +815,7 @@ def main() -> None:
     
     # Collect statistics
     print("\nCollecting weekly statistics...")
-    stats, known_users, org_items_created, org_items_moved, user_items_created, user_items_moved = collect_weekly_stats(
+    stats, known_users, org_items_created, org_items_moved = collect_weekly_stats(
         repo_path,
         alias_map,
         weeks,
@@ -906,20 +823,18 @@ def main() -> None:
         all_refs=args.all_refs,
         org_project_owner=args.org_project_owner,
         org_project_number=args.org_project_number,
-        user_project_owner=args.user_project_owner,
-        user_project_number=args.user_project_number,
         name_fix_map=name_fix_map
     )
     
     # Output
-    print_weekly_table(stats, weeks, args.start_date, args.end_date, org_items_created, org_items_moved, user_items_created, user_items_moved)
+    print_weekly_table(stats, weeks, args.start_date, args.end_date, org_items_created, org_items_moved)
     
     # Write detailed CSV
-    write_weekly_csv(out_weekly_csv, stats, org_items_created, org_items_moved, user_items_created, user_items_moved)
+    write_weekly_csv(out_weekly_csv, stats, org_items_created, org_items_moved)
     print(f"\nWrote detailed stats to {out_weekly_csv}")
     
     # Write summary CSV
-    write_summary_csv(out_summary_csv, stats, weeks, known_users, org_items_created, org_items_moved, user_items_created, user_items_moved, name_fix_map)
+    write_summary_csv(out_summary_csv, stats, weeks, known_users, org_items_created, org_items_moved, name_fix_map)
     print(f"Wrote summary stats to {out_summary_csv}")
 
 

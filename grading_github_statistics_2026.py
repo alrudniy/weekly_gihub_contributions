@@ -16,17 +16,31 @@ Used for GitHub API calls via gh CLI to fetch PRs and project items.
 
 Usage:
 # 
-python grading_github_statistics_2025.py --repo . --all_refs --repo_full drew-csci/opportunity_app_srping_2026 --start_date 2026-01-15 --end_date 2026-05-15 --org_project_owner drew-csci --org_project_number 6 
+python grading_github_statistics_2026.py --repo . --all_refs --repo_full drew-csci/opportunity_app_srping_2026 --start_date 2026-01-15 --end_date 2026-05-15 --org_project_owner drew-csci --org_project_number 6 
 
 # discovery_hub_spring_2026
-python grading_github_statistics_2025.py --repo . --all_refs --repo_full drew-csci/discovery_hub_spring_2026 --start_date 2026-01-15 --end_date 2026-05-15 --org_project_owner drew-csci --org_project_number 7 
+python grading_github_statistics_2026.py --repo . --all_refs --repo_full drew-csci/discovery_hub_spring_2026 --start_date 2026-01-15 --end_date 2026-05-15 --org_project_owner drew-csci --org_project_number 7 
 
 # minecraft_mod_spring_2026
-python grading_github_statistics_2025.py --repo . --all_refs --repo_full drew-csci/minecraft_mod_spring_2026 --start_date 2026-01-15 --end_date 2026-05-15 --org_project_owner drew-csci --org_project_number 5 
+python grading_github_statistics_2026.py --repo . --all_refs --repo_full drew-csci/minecraft_mod_spring_2026 --start_date 2026-01-15 --end_date 2026-05-15 --org_project_owner drew-csci --org_project_number 5 
+
 
 # f25_opportunity
 python grading_github_statistics_2025.py --repo . --all_refs --repo_full drew-csci/f25_opportunity --start_date 2025-08-25 --end_date 2025-12-12 --org_project_owner drew-csci --org_project_number 3 --user_project_owner alrudniy --user_project_number 7 --name_fix_file fix_github_names.xlsx
 
+
+# Column reference:
+# | Column   | Full Name                   | Description                                                                                          |
+# |----------|-----------------------------|------------------------------------------------------------------------------------------------------|
+# | Commits  | Commits                     | Number of git commits made by the user during the week                                               |
+# | Added    | Lines Added                 | Total lines of code added across all commits                                                         |
+# | Deleted  | Lines Deleted               | Total lines of code deleted across all commits                                                       |
+# | PROp     | PRs Opened                  | Number of pull requests the user opened/created during the week                                      |
+# | PRCl     | PRs Closed                  | Number of pull requests the user approved/reviewed (or merged if no approval found) during the week  |
+# | UCrtd    | User Project Items Created  | Number of items created by the user in the user-owned GitHub Project                                 |
+# | UMvd     | User Project Items Moved    | Number of items in the user-owned project that have a status set (moved through workflow)            |
+# | OCrtd    | Org Project Items Created   | Number of items created by the user in the organization-owned GitHub Project                         |
+# | OMvd     | Org Project Items Moved     | Number of items in the organization-owned project that have a status set (moved through workflow)    |
 """
 
 from __future__ import annotations
@@ -60,6 +74,7 @@ class WeeklyUserStats:
     lines_added: int = 0
     lines_deleted: int = 0
     prs_opened: int = 0
+    prs_closed: int = 0
     user_project_items_created: int = 0
     user_project_items_moved: int = 0
     org_project_items_created: int = 0
@@ -358,6 +373,63 @@ def count_prs_for_week(
     return dict(pr_counts)
 
 
+def count_prs_closed_for_week(
+    repo_full: str, 
+    week_start: str, 
+    week_end: str,
+    name_fix_map: Dict[str, str] = None
+) -> Dict[str, int]:
+    """
+    Count PRs closed/merged during a specific week, attributed to the reviewer who approved them.
+    If no approver found, falls back to the user who merged the PR.
+    Returns: dict mapping fixed_name -> pr_count
+    """
+    if name_fix_map is None:
+        name_fix_map = {}
+    
+    try:
+        # Get PRs that were closed during the week
+        out = run_gh([
+            "pr", "list",
+            "--repo", repo_full,
+            "--limit", "2000",
+            "--state", "closed",
+            "--search", f"closed:{week_start}..{week_end}",
+            "--json", "number,mergedBy,reviews,closedAt,author"
+        ])
+        prs = json.loads(out)
+    except RuntimeError:
+        return {}
+    
+    pr_counts: Dict[str, int] = defaultdict(int)
+    
+    for pr in prs:
+        # Find the approver from reviews
+        approver_login = ""
+        reviews = pr.get("reviews") or []
+        
+        # Look for the most recent APPROVED review
+        for review in reviews:
+            state = review.get("state", "")
+            if state == "APPROVED":
+                author = review.get("author") or {}
+                approver_login = author.get("login", "")
+                if approver_login:
+                    break
+        
+        # Fall back to mergedBy if no approver found
+        if not approver_login:
+            merged_by = pr.get("mergedBy") or {}
+            approver_login = merged_by.get("login", "")
+        
+        if approver_login:
+            # Apply name fix to github login
+            fixed_name = apply_name_fix(approver_login, name_fix_map)
+            pr_counts[fixed_name] += 1
+    
+    return dict(pr_counts)
+
+
 def count_project_items_per_user(
     project_owner: str,
     project_number: int,
@@ -568,8 +640,10 @@ def collect_weekly_stats(
         
         # Get PR data for this week (name fix applied inside)
         pr_data: Dict[str, int] = {}
+        pr_closed_data: Dict[str, int] = {}
         if repo_full:
             pr_data = count_prs_for_week(repo_full, week_start, week_end, name_fix_map)
+            pr_closed_data = count_prs_closed_for_week(repo_full, week_start, week_end, name_fix_map)
         
         # Update known users
         for fixed_name, (_, github_username, _, _, _) in commit_data.items():
@@ -582,6 +656,7 @@ def collect_weekly_stats(
         
         # Make a copy of pr_data to track which PRs have been assigned
         remaining_prs = dict(pr_data)
+        remaining_prs_closed = dict(pr_closed_data)
         
         for fixed_name, (_, github_username, commits, added, deleted) in commit_data.items():
             gh = github_username or known_users.get(fixed_name, "")
@@ -604,13 +679,18 @@ def collect_weekly_stats(
                     commits=commits,
                     lines_added=added,
                     lines_deleted=deleted,
-                    prs_opened=0
+                    prs_opened=0,
+                    prs_closed=0
                 )
                 week_users[fixed_name] = stats
             
             # Add PR count - check by fixed_name (PR data already has fixed names)
             if fixed_name in remaining_prs:
                 week_users[fixed_name].prs_opened += remaining_prs.pop(fixed_name)
+            
+            # Add PR closed count
+            if fixed_name in remaining_prs_closed:
+                week_users[fixed_name].prs_closed += remaining_prs_closed.pop(fixed_name)
         
         # Add PR-only users (remaining in pr_data, already have fixed names)
         for fixed_name, pr_count in remaining_prs.items():
@@ -623,7 +703,25 @@ def collect_weekly_stats(
                     week_number=week_num,
                     week_start=week_start,
                     week_end=week_end,
-                    prs_opened=pr_count
+                    prs_opened=pr_count,
+                    prs_closed=0
+                )
+                week_users[fixed_name] = stats
+                known_users[fixed_name] = fixed_name
+        
+        # Add PR-closed-only users (remaining in pr_closed_data)
+        for fixed_name, pr_count in remaining_prs_closed.items():
+            if fixed_name in week_users:
+                week_users[fixed_name].prs_closed += pr_count
+            else:
+                stats = WeeklyUserStats(
+                    display_name=fixed_name,
+                    github_username=fixed_name,
+                    week_number=week_num,
+                    week_start=week_start,
+                    week_end=week_end,
+                    prs_opened=0,
+                    prs_closed=pr_count
                 )
                 week_users[fixed_name] = stats
                 known_users[fixed_name] = fixed_name
@@ -659,7 +757,8 @@ def write_weekly_csv(
             "Commits",
             "Added",
             "Deleted",
-            "PRs",
+            "PRs Opened",
+            "PRs Closed",
             "Items Crtd (usr prj)",
             "Items Mvd (usr prj)",
             "Items Crtd (org prj)",
@@ -682,6 +781,7 @@ def write_weekly_csv(
                 s.lines_added,
                 s.lines_deleted,
                 s.prs_opened,
+                s.prs_closed,
                 usr_created,
                 usr_moved,
                 org_created,
@@ -728,10 +828,11 @@ def write_summary_csv(
                 f"W{week_num} Commits",
                 f"W{week_num} Added",
                 f"W{week_num} Deleted",
-                f"W{week_num} PRs"
+                f"W{week_num} PRs Opened",
+                f"W{week_num} PRs Closed"
             ])
         header.extend([
-            "Total Commits", "Total Added", "Total Deleted", "Total PRs",
+            "Total Commits", "Total Added", "Total Deleted", "Total PRs Opened", "Total PRs Closed",
             "Usr Prj Items Crtd", "Usr Prj Items Mvd",
             "Org Prj Items Crtd", "Org Prj Items Mvd"
         ])
@@ -754,17 +855,19 @@ def write_summary_csv(
             total_added = 0
             total_deleted = 0
             total_prs = 0
+            total_prs_closed = 0
             
             for week_num, week_start, week_end in weeks:
                 if week_num in user_weeks[display_name]:
                     s = user_weeks[display_name][week_num]
-                    row.extend([s.commits, s.lines_added, s.lines_deleted, s.prs_opened])
+                    row.extend([s.commits, s.lines_added, s.lines_deleted, s.prs_opened, s.prs_closed])
                     total_commits += s.commits
                     total_added += s.lines_added
                     total_deleted += s.lines_deleted
                     total_prs += s.prs_opened
+                    total_prs_closed += s.prs_closed
                 else:
-                    row.extend([0, 0, 0, 0])
+                    row.extend([0, 0, 0, 0, 0])
             
             # Get project items for this user (names already fixed at collection time)
             usr_created = user_items_created.get(display_name, 0)
@@ -773,7 +876,7 @@ def write_summary_csv(
             org_moved = org_items_moved.get(display_name, 0)
             
             row.extend([
-                total_commits, total_added, total_deleted, total_prs,
+                total_commits, total_added, total_deleted, total_prs, total_prs_closed,
                 usr_created, usr_moved, org_created, org_moved
             ])
             w.writerow(row)
@@ -790,9 +893,9 @@ def print_weekly_table(
     user_items_moved: Dict[str, int]
 ) -> None:
     """Print weekly statistics as a formatted table."""
-    print(f"\n{'='*130}")
+    print(f"\n{'='*140}")
     print(f"GitHub Weekly Statistics Report: {start_date} to {end_date}")
-    print(f"{'='*130}")
+    print(f"{'='*140}")
     
     # Group by week
     week_stats: Dict[int, List[WeeklyUserStats]] = defaultdict(list)
@@ -800,11 +903,11 @@ def print_weekly_table(
         week_stats[s.week_number].append(s)
     
     for week_num, week_start, week_end in weeks:
-        print(f"\n{'─'*130}")
+        print(f"\n{'─'*140}")
         print(f"Week {week_num}: {week_start} to {week_end}")
-        print("─"*130)
+        print("─"*140)
         
-        header = f"{'Name':30} {'GitHub':20} {'Commits':>8} {'Added':>8} {'Deleted':>8} {'PRs':>6} {'UCrtd':>6} {'UMvd':>6} {'OCrtd':>6} {'OMvd':>6}"
+        header = f"{'Name':30} {'GitHub':20} {'Commits':>8} {'Added':>8} {'Deleted':>8} {'PROp':>6} {'PRCl':>6} {'UCrtd':>6} {'UMvd':>6} {'OCrtd':>6} {'OMvd':>6}"
         print(header)
         print("-" * len(header))
         
@@ -817,6 +920,7 @@ def print_weekly_table(
         total_added = 0
         total_deleted = 0
         total_prs = 0
+        total_prs_closed = 0
         
         for s in week_data:
             # Get project items for this user
@@ -825,27 +929,28 @@ def print_weekly_table(
             org_created = org_items_created.get(s.display_name, 0)
             org_moved = org_items_moved.get(s.display_name, 0)
             
-            if s.commits > 0 or s.prs_opened > 0 or usr_created > 0 or org_created > 0:
+            if s.commits > 0 or s.prs_opened > 0 or s.prs_closed > 0 or usr_created > 0 or org_created > 0:
                 print(
                     f"{s.display_name[:30]:30} {s.github_username[:20]:20} "
-                    f"{s.commits:>8} {s.lines_added:>8} {s.lines_deleted:>8} {s.prs_opened:>6} "
+                    f"{s.commits:>8} {s.lines_added:>8} {s.lines_deleted:>8} {s.prs_opened:>6} {s.prs_closed:>6} "
                     f"{usr_created:>6} {usr_moved:>6} {org_created:>6} {org_moved:>6}"
                 )
                 total_commits += s.commits
                 total_added += s.lines_added
                 total_deleted += s.lines_deleted
                 total_prs += s.prs_opened
+                total_prs_closed += s.prs_closed
         
-        if total_commits > 0 or total_prs > 0:
+        if total_commits > 0 or total_prs > 0 or total_prs_closed > 0:
             print("-" * len(header))
             print(
                 f"{'TOTAL':30} {'':20} "
-                f"{total_commits:>8} {total_added:>8} {total_deleted:>8} {total_prs:>6}"
+                f"{total_commits:>8} {total_added:>8} {total_deleted:>8} {total_prs:>6} {total_prs_closed:>6}"
             )
     
     # Print legend
-    print(f"\n{'='*130}")
-    print("Legend: UCrtd=User Project Items Created, UMvd=User Project Items Moved, OCrtd=Org Project Items Created, OMvd=Org Project Items Moved")
+    print(f"\n{'='*140}")
+    print("Legend: PROp=PRs Opened, PRCl=PRs Closed (by reviewer/approver), UCrtd=User Project Items Created, UMvd=User Project Items Moved, OCrtd=Org Project Items Created, OMvd=Org Project Items Moved")
 
 
 def main() -> None:
